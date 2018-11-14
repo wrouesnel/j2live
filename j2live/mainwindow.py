@@ -31,11 +31,32 @@ class MainWindow(Gtk.ApplicationWindow):
         editorpane = Gtk.Paned.new(Gtk.Orientation.VERTICAL)
         editorpane.set_position((self.get_size()[1] / 3) * 2)
 
+        # Scrolled windows
+        editor_window = Gtk.ScrolledWindow()
+        editor_window.set_policy(Gtk.PolicyType.AUTOMATIC,Gtk.PolicyType.AUTOMATIC)
+        
+        dataeditor_window = Gtk.ScrolledWindow()
+        dataeditor_window.set_policy(Gtk.PolicyType.AUTOMATIC,Gtk.PolicyType.AUTOMATIC)
+        
+        resultview_window = Gtk.ScrolledWindow()
+        resultview_window.set_policy(Gtk.PolicyType.AUTOMATIC,Gtk.PolicyType.AUTOMATIC)
+
+        editorpane.add1(editor_window)
+        editorpane.add2(dataeditor_window)
+        
+        editorpane.add1(editor_window)
+        editorpane.add2(dataeditor_window)
+        
+        mainpane.add1(editorpane)
+        mainpane.add2(resultview_window)
+
         # Editor window
         self.editor: GtkSource.View
         self.editor = GtkSource.View.new()
         self.editor.set_show_line_numbers(True)
         self.editor.set_monospace(True)
+        
+        editor_window.add(self.editor)
 
         # Data editor window
         self.dataeditor: GtkSource.View
@@ -43,8 +64,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.dataeditor.set_show_line_numbers(True)
         self.dataeditor.set_monospace(True)
 
-        editorpane.add1(self.editor)
-        editorpane.add2(self.dataeditor)
+        dataeditor_window.add(self.dataeditor)
 
         # Result viewer stands alone
         self.resultview: GtkSource.View
@@ -53,9 +73,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.resultview.set_editable(False)
         self.resultview.set_monospace(True)
 
-        mainpane.add1(editorpane)
-        mainpane.add2(self.resultview)
+        resultview_window.add(self.resultview)
 
+        # Add the children...
         self.add(mainpane)
 
         # Hook up signals for the main editor
