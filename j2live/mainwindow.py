@@ -8,9 +8,11 @@ from gi.repository import GtkSource
 from j2live.conf import _
 
 import ruamel.yaml as yaml
-import jinja2
 
-from j2live.util import template_from_string, get_text
+from ansible.parsing.dataloader import DataLoader
+from ansible.template import Templar
+
+from j2live.util import get_text
 
 log = logging.getLogger()
 
@@ -83,8 +85,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.editor.get_buffer().connect("changed", self.data_updated, None)
 
         # Initialize local data
-        self.data = {}
-        self.template = template_from_string(get_text(self.dataeditor.get_buffer()))
+        self.loader = DataLoader()
+        self.templar = Templar(None, variables={})
 
         # Grab the default input editor
         self.editor.grab_focus()
@@ -105,20 +107,11 @@ class MainWindow(Gtk.ApplicationWindow):
             except Exception as e:
                 log.exception("Could not parse data input", exc_info=e)
                 return
-            self.data = new_data
+            self.templar.set_available_variables(new_data)
             log.debug("Data replaced")
-        elif buffer is self.editor.get_buffer():
-            try:
-                rtemplate = template_from_string(get_text(buffer))
-            except Exception as e:
-                log.exception("Could not parse input template", exc_info=e)
-                return
-            self.template = rtemplate
-            log.debug("Template replaced")
-
         # Re-render based on the new template or data or both
         try:
-            new_result = self.template.render(**self.data)
+            new_result = self.templar.template(get_text(self.editor.get_buffer()))
         except Exception as e:
             log.exception("Could not render the template", exc_info=e)
             return
