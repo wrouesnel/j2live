@@ -107,11 +107,14 @@ class MainWindow(Gtk.ApplicationWindow):
             except Exception as e:
                 log.exception("Could not parse data input", exc_info=e)
                 return
-            self.templar.set_available_variables(new_data)
+            try:
+                self.templar.set_available_variables(new_data)
+            except Exception as e:
+                log.exception("Could not set data input", exc_info=e)
             log.debug("Data replaced")
         # Re-render based on the new template or data or both
         try:
-            new_result = self.templar.template(get_text(self.editor.get_buffer()))
+            new_result = self.templar.template(get_text(self.editor.get_buffer()), convert_data=False)
         except Exception as e:
             log.exception("Could not render the template", exc_info=e)
             return
