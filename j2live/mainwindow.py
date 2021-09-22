@@ -114,10 +114,10 @@ class MainWindow(Gtk.ApplicationWindow):
             log.debug("Data replaced")
         # Re-render based on the new template or data or both
         try:
-            new_result = self.templar.template(get_text(self.editor.get_buffer()), convert_data=False)
+            new_result = self.templar.template(get_text(self.editor.get_buffer()))
         except Exception as e:
             log.exception("Could not render the template", exc_info=e)
             return
 
-        self.resultview.get_buffer().set_text(new_result)
+        self.resultview.get_buffer().set_text(str(new_result))
         log.debug("Re-Rendered results")
