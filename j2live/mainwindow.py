@@ -57,6 +57,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.editor = GtkSource.View.new()
         self.editor.set_show_line_numbers(True)
         self.editor.set_monospace(True)
+        self.editor.set_tab_width(2)
+        self.editor.set_insert_spaces_instead_of_tabs(True)
         
         editor_window.add(self.editor)
 
@@ -65,6 +67,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.dataeditor = GtkSource.View.new()
         self.dataeditor.set_show_line_numbers(True)
         self.dataeditor.set_monospace(True)
+        self.dataeditor.set_tab_width(2)
+        self.dataeditor.set_insert_spaces_instead_of_tabs(True)
 
         dataeditor_window.add(self.dataeditor)
 
@@ -108,7 +112,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 log.exception("Could not parse data input", exc_info=e)
                 return
             try:
-                self.templar.set_available_variables(new_data)
+                self.templar.available_variables = new_data
             except Exception as e:
                 log.exception("Could not set data input", exc_info=e)
             log.debug("Data replaced")
