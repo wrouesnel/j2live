@@ -56,6 +56,7 @@ def configure_logging():
         processor=processor, foreign_pre_chain=pre_chain
     )
 
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
 

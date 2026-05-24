@@ -16,9 +16,11 @@ This isn't properly developed, but it works for it's basic function.
 Ubuntu:
 
 ```
-sudo apt install libcairo2-dev libgirepository1.0-dev gir1.2-gtk-3.0
-virtualenv -p python3 venv
-. venv/bin/activate
-pip install -r requirements.txt
-python -m j2live
+sudo apt install libcairo2-dev libgirepository-2.0-dev gir1.2-gtk-3.0
+uv run j2live
 ```
+
+## Acknowledgements
+
+The UI elements are wholesale borrowed from the [Meld](https://gitlab.gnome.org/GNOME/meld).
+All rights to that code belong to them.

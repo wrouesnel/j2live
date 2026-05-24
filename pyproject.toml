@@ -1,0 +1,19 @@
+[project]
+name = "j2live"
+version = "0.1.0"
+description = "Jinja2 Live Editor"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jinja2>=3.1.6",
+    "pygobject>=3.56.3",
+    "pygobject-stubs>=2.17.0",
+    "ruamel-yaml>=0.19.1",
+    "structlog>=25.5.0",
+]
+
+[tool.uv]
+config-settings-package = { pygobject-stubs = { config = "Gtk3,Gdk3,Soup2" } }
+
+[project.scripts]
+j2live = "j2live:__main__"
