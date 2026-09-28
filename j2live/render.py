@@ -50,6 +50,13 @@ class RenderError:
 
 
 @dataclass
+class RenderOptions:
+    """Whitespace options of the ansible template module, with its defaults"""
+    trim_blocks: bool = True
+    lstrip_blocks: bool = False
+
+
+@dataclass
 class RenderResult:
     output: Optional[str] = None
     errors: list[RenderError] = field(default_factory=list)
@@ -82,9 +89,11 @@ def parse_data(text: str) -> tuple[Optional[dict], Optional[RenderError]]:
     return data, None
 
 
-def parse_template(text: str) -> tuple[Optional[jinja2.Template], Optional[RenderError]]:
+def parse_template(text: str, options: RenderOptions = RenderOptions()
+                   ) -> tuple[Optional[jinja2.Template], Optional[RenderError]]:
     try:
-        return template_from_string(text), None
+        return template_from_string(text, trim_blocks=options.trim_blocks,
+                                    lstrip_blocks=options.lstrip_blocks), None
     except jinja2.TemplateSyntaxError as e:
         return None, RenderError(ErrorSource.TEMPLATE, e.message or str(e),
                                  e.lineno - 1 if e.lineno else None)
@@ -112,13 +121,14 @@ def render(template: jinja2.Template, data: dict[str, Any]) -> RenderResult:
                                                 _template_line(e))])
 
 
-def render_plain(template_text: str, data_text: str) -> RenderResult:
+def render_plain(template_text: str, data_text: str,
+                 options: RenderOptions = RenderOptions()) -> RenderResult:
     """Render with stock Jinja2 and ruamel YAML, without Ansible."""
     errors = []
     data, data_error = parse_data(data_text)
     if data_error:
         errors.append(data_error)
-    template, template_error = parse_template(template_text)
+    template, template_error = parse_template(template_text, options)
     if template_error:
         errors.append(template_error)
     if errors:

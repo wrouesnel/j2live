@@ -6,7 +6,8 @@ the oldest Python ansible-core supports.
 
 Protocol: one JSON object per line.
   -> {"template": str, "data": str,
-      "template_path": str|null, "data_path": str|null}
+      "template_path": str|null, "data_path": str|null,
+      "trim_blocks": bool, "lstrip_blocks": bool}
   <- {"output": str|null, "errors": [{"source", "message", "line"}]}
 On startup a hello line is written:
   <- {"python": str, "prefix": str, "python_version": str,
@@ -184,9 +185,9 @@ class Renderer(object):
         base = os.path.dirname(template_path) if template_path else os.getcwd()
         return [os.path.join(base, "templates"), base]
 
-    def render(self, text, variables, template_path):
+    def render(self, text, variables, template_path, trim_blocks=True, lstrip_blocks=False):
         """Render the way the ansible template action does."""
-        overrides = dict(trim_blocks=True, lstrip_blocks=False)
+        overrides = dict(trim_blocks=trim_blocks, lstrip_blocks=lstrip_blocks)
         tm = self.template_module
         if self.modern:
             overrides["newline_sequence"] = "\n"
@@ -208,13 +209,15 @@ class Renderer(object):
     def handle(self, request):
         text = request.get("template", "")
         template_path = request.get("template_path")
+        options = dict(trim_blocks=request.get("trim_blocks", True),
+                       lstrip_blocks=request.get("lstrip_blocks", False))
         data, data_error = self.load_data(request.get("data", ""), request.get("data_path"))
 
         if data_error is not None:
             # Still surface template syntax errors alongside the data error
             errors = [data_error]
             try:
-                self.render(text, {}, template_path)
+                self.render(text, {}, template_path, **options)
             except Exception as e:
                 error = _template_error(e, text)
                 if error["source"] == "template":
@@ -224,7 +227,8 @@ class Renderer(object):
         variables = dict(data)
         variables.update(self.template_vars(template_path))
         try:
-            return {"output": self.render(text, variables, template_path), "errors": []}
+            return {"output": self.render(text, variables, template_path, **options),
+                    "errors": []}
         except Exception as e:
             return {"output": None, "errors": [_template_error(e, text)]}
 

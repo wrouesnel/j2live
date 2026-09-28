@@ -1,8 +1,4 @@
-"""Main module"""
-import sys
-# For whatever reason this is needed to get the logging system to start properly when
-# run from uv run.
-sys.path.pop(0)
+"""Allow running as python -m j2live"""
+from j2live.app import run
 
-import j2live.app
-sys.exit(j2live.app.main(sys.argv))
+run()

@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ Jinja2 template syntax for GtkSourceView.
+
+ Only the Jinja2 constructs are highlighted; the surrounding text is left
+ plain since a template can produce any kind of file.
+-->
+<language id="jinja2" name="Jinja2" version="2.0" _section="Markup">
+  <metadata>
+    <property name="globs">*.j2;*.jinja;*.jinja2</property>
+    <property name="block-comment-start">{#</property>
+    <property name="block-comment-end">#}</property>
+  </metadata>
+
+  <styles>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="delimiter" name="Delimiter" map-to="def:preprocessor"/>
+    <style id="keyword" name="Keyword" map-to="def:keyword"/>
+    <style id="string" name="String" map-to="def:string"/>
+    <style id="number" name="Number" map-to="def:decimal"/>
+    <style id="special" name="Special Constant" map-to="def:special-constant"/>
+    <style id="filter" name="Filter" map-to="def:function"/>
+    <style id="header" name="Override Header" map-to="def:preprocessor"/>
+  </styles>
+
+  <definitions>
+    <context id="string">
+      <include>
+        <context style-ref="string">
+          <start>"</start>
+          <end>"</end>
+          <include><context ref="def:escape"/></include>
+        </context>
+        <context style-ref="string">
+          <start>'</start>
+          <end>'</end>
+          <include><context ref="def:escape"/></include>
+        </context>
+      </include>
+    </context>
+
+    <context id="code">
+      <include>
+        <context ref="string"/>
+        <context id="number" style-ref="number">
+          <match>\b[0-9]+(\.[0-9]+)?\b</match>
+        </context>
+        <context id="filter">
+          <match>(\|)\s*([A-Za-z_][A-Za-z0-9_.]*)</match>
+          <include>
+            <context sub-pattern="2" style-ref="filter"/>
+          </include>
+        </context>
+        <context id="test">
+          <match>\b(is)\s+(not\s+)?([A-Za-z_][A-Za-z0-9_]*)</match>
+          <include>
+            <context sub-pattern="1" style-ref="keyword"/>
+            <context sub-pattern="2" style-ref="keyword"/>
+            <context sub-pattern="3" style-ref="filter"/>
+          </include>
+        </context>
+        <context id="special" style-ref="special">
+          <keyword>true</keyword>
+          <keyword>false</keyword>
+          <keyword>none</keyword>
+          <keyword>True</keyword>
+          <keyword>False</keyword>
+          <keyword>None</keyword>
+          <keyword>loop</keyword>
+        </context>
+        <context id="keyword" style-ref="keyword">
+          <keyword>and</keyword>
+          <keyword>as</keyword>
+          <keyword>block</keyword>
+          <keyword>break</keyword>
+          <keyword>call</keyword>
+          <keyword>context</keyword>
+          <keyword>continue</keyword>
+          <keyword>do</keyword>
+          <keyword>elif</keyword>
+          <keyword>else</keyword>
+          <keyword>endblock</keyword>
+          <keyword>endcall</keyword>
+          <keyword>endfilter</keyword>
+          <keyword>endfor</keyword>
+          <keyword>endif</keyword>
+          <keyword>endmacro</keyword>
+          <keyword>endraw</keyword>
+          <keyword>endset</keyword>
+          <keyword>endwith</keyword>
+          <keyword>extends</keyword>
+          <keyword>filter</keyword>
+          <keyword>for</keyword>
+          <keyword>from</keyword>
+          <keyword>if</keyword>
+          <keyword>ignore</keyword>
+          <keyword>import</keyword>
+          <keyword>in</keyword>
+          <keyword>include</keyword>
+          <keyword>macro</keyword>
+          <keyword>missing</keyword>
+          <keyword>not</keyword>
+          <keyword>or</keyword>
+          <keyword>raw</keyword>
+          <keyword>recursive</keyword>
+          <keyword>scoped</keyword>
+          <keyword>set</keyword>
+          <keyword>with</keyword>
+          <keyword>without</keyword>
+        </context>
+      </include>
+    </context>
+
+    <context id="jinja2">
+      <include>
+        <context id="override-header" style-ref="header" first-line-only="true">
+          <match>^#jinja2:.*$</match>
+        </context>
+        <context id="comment" style-ref="comment" class="comment" class-disabled="no-spell-check">
+          <start>\{#</start>
+          <end>#\}</end>
+          <include><context ref="def:in-comment"/></include>
+        </context>
+        <context id="raw" class="no-spell-check">
+          <start>(\{%[-+]?)\s*(raw)\s*([-+]?%\})</start>
+          <end>(\{%[-+]?)\s*(endraw)\s*([-+]?%\})</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="delimiter"/>
+            <context sub-pattern="2" where="start" style-ref="keyword"/>
+            <context sub-pattern="3" where="start" style-ref="delimiter"/>
+            <context sub-pattern="1" where="end" style-ref="delimiter"/>
+            <context sub-pattern="2" where="end" style-ref="keyword"/>
+            <context sub-pattern="3" where="end" style-ref="delimiter"/>
+          </include>
+        </context>
+        <context id="statement" class="no-spell-check">
+          <start>\{%[-+]?</start>
+          <end>[-+]?%\}</end>
+          <include>
+            <context sub-pattern="0" where="start" style-ref="delimiter"/>
+            <context sub-pattern="0" where="end" style-ref="delimiter"/>
+            <context ref="code"/>
+          </include>
+        </context>
+        <context id="expression" class="no-spell-check">
+          <start>\{\{[-+]?</start>
+          <end>[-+]?\}\}</end>
+          <include>
+            <context sub-pattern="0" where="start" style-ref="delimiter"/>
+            <context sub-pattern="0" where="end" style-ref="delimiter"/>
+            <context ref="code"/>
+          </include>
+        </context>
+      </include>
+    </context>
+  </definitions>
+</language>

@@ -7,13 +7,21 @@ requires-python = ">=3.11"
 dependencies = [
     "jinja2>=3.1.6",
     "pygobject>=3.56.3",
-    "pygobject-stubs>=2.17.0",
     "ruamel-yaml>=0.19.1",
     "structlog>=25.5.0",
 ]
 
-[tool.uv]
-config-settings-package = { pygobject-stubs = { config = "Gtk3,Gdk3,Soup2" } }
-
 [project.scripts]
 j2live = "j2live.app:run"
+
+[dependency-groups]
+dev = [
+    "pygobject-stubs>=2.17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+config-settings-package = { pygobject-stubs = { config = "Gtk3,Gdk3,Soup2" } }

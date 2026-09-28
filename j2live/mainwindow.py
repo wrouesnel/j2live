@@ -1,29 +1,23 @@
 """Main window routines"""
-import functools
+from dataclasses import dataclass
 from importlib import metadata
-from typing import Optional, Tuple
+from typing import Callable, Optional
 
 from j2live import logging
 from j2live.language_manager import LanguageManager
 from j2live.environments import (
     AnsibleWorker, PythonEnvironment, detect_interpreters, interpreter_for_prefix, probe)
-from j2live.render import ErrorSource, RenderError, RenderResult, render_plain
-from j2live.ui.sourcebuffer import SourceBuffer, SourceBufferState
-from j2live.ui.sourcestatusbar import SourceStatusBar
+from j2live.render import ErrorSource, RenderError, RenderOptions, RenderResult, render_plain
+from j2live.ui.editorpane import EditorPane
 
 from gi.repository import Gdk, Gio, Gtk, GLib, GObject, Pango
 from gi.repository import GtkSource
 
 from j2live.conf import _
 
-from j2live.ui.sourceview import get_custom_encoding_candidates
-
 from j2live.util import get_text
 
 log = logging.getLogger()
-
-DEFAULT_TAB_WIDTH = 4
-DEFAULT_SPACE_TABS = True
 
 DEFAULT_WIDTH = 1100
 DEFAULT_HEIGHT = 700
@@ -38,10 +32,36 @@ SPINNER_DELAY_MS = 250
 ERROR_MARK_CATEGORY = "j2live-error"
 RESPONSE_GO_TO_ERROR = 1
 
+# Keyboard shortcuts for window actions
+ACCELERATORS = {
+    "win.open-template": ["<Primary>o"],
+    "win.open-data": ["<Primary><Shift>o"],
+    "win.save": ["<Primary>s"],
+    "win.save-as": ["<Primary><Shift>s"],
+    "win.close": ["<Primary>w"],
+    "app.quit": ["<Primary>q"],
+    "win.go-to-error": ["F8"],
+    "win.show-whitespace": ["<Primary><Shift>w"],
+}
+
+
+@dataclass
+class LaunchOptions:
+    """Command line settings for a new window"""
+    template: Optional[str] = None
+    data: Optional[str] = None
+    # Interpreter or environment directory to render with
+    python: Optional[str] = None
+    plain: bool = False
+    trim_blocks: bool = True
+    lstrip_blocks: bool = False
+    title: Optional[str] = None
+
 
 class MainWindow(Gtk.ApplicationWindow):
-    def __init__(self, app):
+    def __init__(self, app, options: Optional[LaunchOptions] = None):
         Gtk.Window.__init__(self, title=_("j2live"), application=app)
+        self.options = options or LaunchOptions()
         self.set_size_request(800, 500)
         self.set_default_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
 
@@ -49,111 +69,179 @@ class MainWindow(Gtk.ApplicationWindow):
         self.environments: list[PythonEnvironment] = []
         self.environment: Optional[PythonEnvironment] = None
         self.worker: Optional[AnsibleWorker] = None
+        self.render_options = RenderOptions(
+            trim_blocks=self.options.trim_blocks,
+            lstrip_blocks=self.options.lstrip_blocks)
 
-        # Menu bar
-        menubar = self._menubar()
+        self._render_source_id = None
+        self._errors: list[RenderError] = []
+        # Set once the user has agreed to close despite unsaved changes
+        self._close_confirmed = False
+
+        self.template_pane = EditorPane(_("Template"), language_id="jinja2")
+        self.data_pane = EditorPane(_("Variables"), language_id="yaml")
+        self.result_pane = EditorPane(_("Output"), editable=False)
+        # The pane Save applies to: whichever editable pane had focus last
+        self.active_pane = self.template_pane
+        for pane in (self.template_pane, self.data_pane):
+            self._setup_error_marks(pane.view)
+            pane.view.connect("focus-in-event", self._on_pane_focus, pane)
+            pane.buffer.connect("changed", self.data_updated)
+            pane.connect("file-state-changed", lambda *args: self._update_title())
+
+        self._setup_actions(app)
 
         box = Gtk.Box.new(orientation=Gtk.Orientation.VERTICAL,spacing=0)
         self.add(box)
 
-        box.pack_start(menubar, False, False,0)
+        box.pack_start(Gtk.MenuBar.new_from_model(self._menu_model()), False, False, 0)
         box.pack_start(self._environment_bar(), False, False, 0)
         box.pack_start(Gtk.Separator(), False, False, 0)
 
-        # Initialize panes
-        mainpane: Gtk.Paned
-        mainpane = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
-        # Set initial size to 50/50
-        mainpane.set_position(DEFAULT_WIDTH // 2)
-
-        # Build the editor pane
-        editorpane: Gtk.Paned
+        # Template over variables on the left, output on the right
         editorpane = Gtk.Paned.new(Gtk.Orientation.VERTICAL)
         editorpane.set_position((DEFAULT_HEIGHT // 3) * 2)
+        editorpane.pack1(self.template_pane, True, False)
+        editorpane.pack2(self.data_pane, True, False)
 
-        # Editor window
-        template_editor, self.template_buffer, self.template_view = self._source_editor()
-        data_editor, self.data_buffer, self.data_view = self._source_editor()
-
-        # Result viewer stands alone
-        result_editor, self.result_buffer, self.result_view = self._source_editor(editable=False)
-
-        editorpane.add1(template_editor)
-        editorpane.add2(data_editor)
-
-        mainpane.add1(editorpane)
-        mainpane.add2(self._result_pane(result_editor))
-
-        # Add configure main pane
+        mainpane = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        mainpane.set_position(DEFAULT_WIDTH // 2)
+        mainpane.pack1(editorpane, True, False)
+        mainpane.pack2(self._result_pane(), True, False)
         mainpane.set_vexpand(True)
         mainpane.set_hexpand(True)
+        box.pack_start(mainpane, True, True, 0)
 
-        # Add to the box
-        box.add(mainpane)
+        self.result_pane.set_show_whitespace(True)
 
-        # Main initialization logic
-
-        # Hook up signals for the main editor
-        self.data_buffer.connect("changed", self.data_updated)
-        self.template_buffer.connect("changed", self.data_updated)
-
-        self._render_source_id = None
-        self._errors: list[RenderError] = []
         self._detect_environments()
+        self.connect("delete-event", self.on_delete_event)
         self.connect("destroy", lambda *args: self.worker and self.worker.stop())
 
         # Focus can only be grabbed once the window is mapped
-        self.connect("map", lambda *args: self.template_view.grab_focus())
+        self.connect("map", lambda *args: self.template_pane.view.grab_focus())
 
-    def _menubar(self) -> Gtk.MenuBar:
-        menubar : Gtk.MenuBar
-        menubar = Gtk.MenuBar.new()
-        menubar.set_hexpand(True)
+        if self.options.template:
+            self.open_template(Gio.File.new_for_commandline_arg(self.options.template))
+        if self.options.data:
+            self.open_data(Gio.File.new_for_commandline_arg(self.options.data))
+        self._update_title()
 
-        menu_file = self._add_submenu(menubar, 'File')
-        menu_file_open_template = self._add_menuitem(menu_file, 'Open Template')
-        menu_file_open_template.connect('activate', self.on_menu_open_template)
-        menu_file_open_data = self._add_menuitem(menu_file, 'Open Data')
-        menu_file_open_data.connect('activate', self.on_menu_open_data)
-        self._add_menuspacer(menu_file)
-        # menu_file_save = self._add_menuitem(menu_file, 'Save')
-        # menu_file_save.connect('activate', self.on_menu_save)
-        # self._add_menuspacer(menu_file)
-        menu_quit = self._add_menuitem(menu_file, 'Quit')
-        menu_quit.connect('activate', self.on_menu_quit)
+    # Actions and menus
 
-        menu_edit = self._add_submenu(menubar, 'Edit')
-        menu_edit_cut = self._add_menuitem(menu_edit, 'Cut')
-        menu_edit_cut.connect('activate', functools.partial(self._signal_for_current_widget,"cut-clipboard"))
-        menu_edit_copy = self._add_menuitem(menu_edit, 'Copy')
-        menu_edit_copy.connect('activate', functools.partial(self._signal_for_current_widget,"copy-clipboard"))
-        menu_edit_paste = self._add_menuitem(menu_edit, 'Paste')
-        menu_edit_paste.connect('activate', functools.partial(self._signal_for_current_widget,"paste-clipboard"))
+    def _setup_actions(self, app):
+        simple = {
+            "open-template": lambda *args: self.on_open_template(),
+            "open-data": lambda *args: self.on_open_data(),
+            "save": lambda *args: self.active_pane.save(self, self._report_save),
+            "save-as": lambda *args: self.active_pane.save_as(self, self._report_save),
+            "save-output": lambda *args: self.result_pane.save_as(self, self._report_save),
+            "close": lambda *args: self.close(),
+            "go-to-error": lambda *args: self.go_to_error(),
+            "about": lambda *args: self.on_about(),
+            "cut": lambda *args: self._signal_for_focus("cut-clipboard"),
+            "copy": lambda *args: self._signal_for_focus("copy-clipboard"),
+            "paste": lambda *args: self._signal_for_focus("paste-clipboard"),
+        }
+        for name, callback in simple.items():
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", callback)
+            self.add_action(action)
 
-        menu_help = self._add_submenu(menubar, 'Help')
-        menu_help_about = self._add_menuitem(menu_help, "About")
-        menu_help_about.connect("activate", self.on_menu_about)
+        toggles = {
+            "trim-blocks": (self.render_options.trim_blocks, self._on_trim_blocks),
+            "lstrip-blocks": (self.render_options.lstrip_blocks, self._on_lstrip_blocks),
+            "show-whitespace": (True, self._on_show_whitespace),
+        }
+        for name, (initial, callback) in toggles.items():
+            action = Gio.SimpleAction.new_stateful(
+                name, None, GLib.Variant.new_boolean(initial))
+            action.connect("change-state", callback)
+            self.add_action(action)
 
+        for action, accels in ACCELERATORS.items():
+            app.set_accels_for_action(action, accels)
+
+    def _menu_model(self) -> Gio.Menu:
+        def section(*items):
+            menu = Gio.Menu()
+            for label, action in items:
+                menu.append(label, action)
+            return menu
+
+        file_menu = Gio.Menu()
+        file_menu.append_section(None, section(
+            (_("_Open Template…"), "win.open-template"),
+            (_("Open _Variables…"), "win.open-data")))
+        file_menu.append_section(None, section(
+            (_("_Save"), "win.save"),
+            (_("Save _As…"), "win.save-as"),
+            (_("Save _Output As…"), "win.save-output")))
+        file_menu.append_section(None, section(
+            (_("_Close"), "win.close"),
+            (_("_Quit"), "app.quit")))
+
+        edit_menu = section(
+            (_("Cu_t"), "win.cut"),
+            (_("_Copy"), "win.copy"),
+            (_("_Paste"), "win.paste"))
+
+        view_menu = Gio.Menu()
+        view_menu.append_section(None, section(
+            (_("Show _Whitespace in Output"), "win.show-whitespace")))
+        view_menu.append_section(None, section(
+            (_("_Go to Error"), "win.go-to-error")))
+
+        render_menu = section(
+            (_("_trim_blocks"), "win.trim-blocks"),
+            (_("_lstrip_blocks"), "win.lstrip-blocks"))
+
+        help_menu = section((_("_About"), "win.about"))
+
+        menubar = Gio.Menu()
+        menubar.append_submenu(_("_File"), file_menu)
+        menubar.append_submenu(_("_Edit"), edit_menu)
+        menubar.append_submenu(_("_View"), view_menu)
+        menubar.append_submenu(_("_Render"), render_menu)
+        menubar.append_submenu(_("_Help"), help_menu)
         return menubar
 
-    def _add_submenu(self, menubar, label) -> Gtk.Menu:
-        menuitem = Gtk.MenuItem(label=label)
+    def _signal_for_focus(self, signal_name):
+        """Emit a clipboard signal on the focused widget, if it has one"""
+        widget = self.get_focus()
+        if widget is None or not GObject.signal_lookup(signal_name, type(widget)):
+            return
+        widget.emit(signal_name)
 
-        submenu = Gtk.Menu()
-        menuitem.set_submenu(submenu)
+    def _on_trim_blocks(self, action, value):
+        action.set_state(value)
+        self.render_options.trim_blocks = value.get_boolean()
+        self._rerender()
 
-        menubar.add(menuitem)
-        return submenu
+    def _on_lstrip_blocks(self, action, value):
+        action.set_state(value)
+        self.render_options.lstrip_blocks = value.get_boolean()
+        self._rerender()
 
-    def _add_menuitem(self, submenu, label):
-        menuitem = Gtk.MenuItem(label=label)
-        submenu.add(menuitem)
-        return menuitem
+    def _on_show_whitespace(self, action, value):
+        action.set_state(value)
+        self.result_pane.set_show_whitespace(value.get_boolean())
 
-    def _add_menuspacer(self, submenu):
-        menuitem = Gtk.SeparatorMenuItem()
-        submenu.add(menuitem)
-        return menuitem
+    def _on_pane_focus(self, view, event, pane):
+        self.active_pane = pane
+        return False
+
+    def _update_title(self):
+        name = self.template_pane.display_name if self.template_pane.gfile else _("j2live")
+        if self.template_pane.modified or self.data_pane.modified:
+            name = "• " + name
+        if self.options.title:
+            name = "%s — %s" % (name, self.options.title)
+        elif self.template_pane.gfile:
+            name = "%s — j2live" % name
+        self.set_title(name)
+
+    # Environment selection
 
     def _environment_bar(self) -> Gtk.Widget:
         """Shows which Python environment renders templates, and switches it"""
@@ -179,6 +267,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.render_spinner.set_no_show_all(True)
         bar.pack_start(self.render_spinner, False, False, 0)
         self._spinner_source_id = None
+
+        # The template module's whitespace options
+        for name, tooltip in (
+                ("lstrip-blocks", _("Strip whitespace before block tags on a line")),
+                ("trim-blocks", _("Remove the first newline after a block tag"))):
+            toggle = Gtk.CheckButton(label=name.replace("-", "_"), tooltip_text=tooltip)
+            toggle.set_action_name("win." + name)
+            bar.pack_end(toggle, False, False, 0)
 
         self._update_environment_label()
         return bar
@@ -207,7 +303,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _environment_row(self, env: Optional[PythonEnvironment]) -> Gtk.ListBoxRow:
         if env is None:
             title = _("Plain Jinja2")
-            detail = _("No Ansible: stock Jinja2 settings and filters")
+            detail = _("No Ansible: stock Jinja2 filters and YAML")
         else:
             title = env.display_prefix
             if env.has_ansible:
@@ -253,7 +349,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 GLib.markup_escape_text(env.ansible_version))
             tooltip = _("Rendering with ansible-core %s from %s (Python %s)") % (
                 env.ansible_version, env.python, env.python_version)
-        elif any(not (e.has_ansible or e.error or e.python_version) for e in self.environments):
+        elif self._probing(self.environments) and not self.options.plain:
             markup = _("Looking for Ansible…")
             tooltip = None
         else:
@@ -263,16 +359,37 @@ class MainWindow(Gtk.ApplicationWindow):
         self.environment_label.set_markup(markup)
         self.environment_button.set_tooltip_text(tooltip)
 
+    @staticmethod
+    def _probing(environments: list[PythonEnvironment]) -> bool:
+        return any(not (e.has_ansible or e.error or e.python_version) for e in environments)
+
     def _detect_environments(self):
-        """Probe likely environments and use the first with ansible-core"""
-        self.environments = [PythonEnvironment(python) for python in detect_interpreters()]
+        """Probe likely environments and use the first with ansible-core,
+        unless the command line chose one."""
+        requested = None
+        if self.options.python:
+            python = interpreter_for_prefix(self.options.python) or self.options.python
+            requested = PythonEnvironment(python)
+
+        self.environments = [PythonEnvironment(python) for python in detect_interpreters()
+                             if requested is None or python != requested.python]
+        if requested is not None:
+            self.environments.insert(0, requested)
         self._refresh_environments()
 
         def probed(env):
             self._refresh_environments()
-            pending = [e for e in self.environments
-                       if not (e.has_ansible or e.error or e.python_version)]
-            if pending or self.environment is not None:
+            if self.options.plain or self.environment is not None:
+                return
+            if requested is not None:
+                if env is requested:
+                    self._select_environment(env)
+                    if not env.has_ansible:
+                        self._show_message(
+                            Gtk.MessageType.ERROR, _("ansible-core is not available"),
+                            _("Could not import ansible from %s:\n%s") % (env.python, env.error))
+                return
+            if self._probing(self.environments):
                 return
             found = next((e for e in self.environments if e.has_ansible), None)
             log.info("Detected environments",
@@ -284,6 +401,8 @@ class MainWindow(Gtk.ApplicationWindow):
             probe(env, probed)
 
     def _select_environment(self, env: Optional[PythonEnvironment]):
+        if env is not None and not env.has_ansible:
+            env = None
         if self.worker is not None:
             self.worker.stop()
             self._set_rendering(False)
@@ -299,19 +418,14 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_choose_environment(self, button):
         self.environment_button.get_popover().popdown()
-        dialog = Gtk.FileChooserDialog(
-            title=_("Choose Python Environment"), transient_for=self,
-            action=Gtk.FileChooserAction.SELECT_FOLDER)
-        dialog.add_buttons(
-            _("_Cancel"), Gtk.ResponseType.CANCEL,
-            _("_Select"), Gtk.ResponseType.OK)
-        try:
-            if dialog.run() != Gtk.ResponseType.OK:
-                return
-            prefix = dialog.get_filename()
-        finally:
-            dialog.destroy()
-        self.use_environment_folder(prefix)
+        dialog = Gtk.FileChooserNative.new(
+            _("Choose Python Environment"), self,
+            Gtk.FileChooserAction.SELECT_FOLDER, _("_Select"), None)
+        response = dialog.run()
+        prefix = dialog.get_filename()
+        dialog.destroy()
+        if response == Gtk.ResponseType.ACCEPT and prefix:
+            self.use_environment_folder(prefix)
 
     def use_environment_folder(self, prefix: str):
         """Switch to the Python environment in prefix, if it has ansible-core"""
@@ -338,7 +452,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         probe(env, probed)
 
-    def _result_pane(self, result_editor: Gtk.Widget) -> Gtk.Widget:
+    # Output and errors
+
+    def _result_pane(self) -> Gtk.Widget:
         """Wrap the result editor with a bar for reporting render errors"""
         box = Gtk.Box.new(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -351,72 +467,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.error_bar.set_revealed(False)
 
         box.pack_start(self.error_bar, False, False, 0)
-        box.pack_start(result_editor, True, True, 0)
+        box.pack_start(self.result_pane, True, True, 0)
         return box
-
-    def _source_editor(self, editable=True) -> Tuple[Gtk.Widget, SourceBuffer, GtkSource.View]:
-        """_source_editor builds a complete source editor object"""
-
-        box: Gtk.Box
-        box = Gtk.Box.new(orientation=Gtk.Orientation.VERTICAL,spacing=0)
-
-        container: Gtk.ScrolledWindow
-        container = Gtk.ScrolledWindow()
-
-        buffer: SourceBuffer
-        buffer = SourceBuffer()
-
-        editor: GtkSource.View
-        editor = GtkSource.View.new_with_buffer(buffer)
-        editor.set_show_line_numbers(True)
-        editor.set_monospace(True)
-        editor.set_highlight_current_line(True)
-        editor.set_tab_width(DEFAULT_TAB_WIDTH)
-        editor.set_insert_spaces_instead_of_tabs(DEFAULT_SPACE_TABS)
-        editor.props.editable = editable
-
-        editor.props.hexpand = True
-        editor.props.vexpand = True
-
-        if editable:
-            self._setup_error_marks(editor)
-
-        container.add(editor)
-
-        status_bar = SourceStatusBar()
-        status_bar.props.visible = True
-
-        def bind_adapt_cursor_position(binding, from_value):
-            buf = binding.get_source()
-            cursor_it = buf.get_iter_at_offset(from_value)
-            return (cursor_it.get_line(), cursor_it.get_line_offset())
-
-        # Set cursor position to 0,0 initially...
-        status_bar.props.cursor_position = (0,0)
-
-        # Setup the status bar properly (also copied from meld)
-        buffer.bind_property("cursor-position", status_bar, "cursor_position",
-                             GObject.BindingFlags.DEFAULT,
-                             bind_adapt_cursor_position,
-                             )
-
-        buffer.bind_property(
-            'language', status_bar, 'source-language',
-            GObject.BindingFlags.BIDIRECTIONAL)
-
-        buffer.data.bind_property(
-            'encoding', status_bar, 'source-encoding',
-            GObject.BindingFlags.DEFAULT)
-
-        # TODO: reload with a user-chosen encoding
-        # status_bar.connect('encoding-changed', reload_with_encoding, editor)
-        status_bar.connect(
-            'go-to-line', lambda widget, line: self.go_to_line(editor, line, focus=False))
-
-        box.add(container)
-        box.add(status_bar)
-
-        return box, buffer, editor
 
     def _setup_error_marks(self, view: GtkSource.View):
         """Highlight lines carrying an error mark, with the message as a tooltip"""
@@ -437,137 +489,21 @@ class MainWindow(Gtk.ApplicationWindow):
         line = buffer.get_iter_at_mark(mark).get_line()
         return "\n".join(
             e.describe() for e in self._errors
-            if self._view_for_error(e).get_buffer() is buffer and e.line == line)
+            if self._pane_for_error(e).buffer is buffer and e.line == line)
 
-    def _view_for_error(self, error: RenderError) -> GtkSource.View:
+    def _pane_for_error(self, error: RenderError) -> EditorPane:
         if error.source is ErrorSource.DATA:
-            return self.data_view
-        return self.template_view
+            return self.data_pane
+        return self.template_pane
 
-    def go_to_line(self, view: GtkSource.View, line: int, focus: bool = True):
-        buffer = view.get_buffer()
-        buffer.place_cursor(buffer.get_iter_at_line(line))
-        view.scroll_to_mark(buffer.get_insert(), 0.1, False, 0, 0)
-        if focus:
-            view.grab_focus()
-
-    def _signal_for_current_widget(self, signal_name, *args):
-        """_signal_for_current_widget emits the named signal against the currently focused widget"""
-        widget = self.get_focus()
-        if widget is None or not GObject.signal_lookup(signal_name, type(widget)):
-            return
-        widget.emit(signal_name)
-
-    def _choose_file(self, title: str) -> Optional[Gio.File]:
-        dialog = Gtk.FileChooserDialog(
-            title=title, transient_for=self, action=Gtk.FileChooserAction.OPEN)
-        dialog.add_buttons(
-            _("_Cancel"), Gtk.ResponseType.CANCEL,
-            _("_Open"), Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
-        try:
-            if dialog.run() != Gtk.ResponseType.OK:
-                return None
-            return dialog.get_file()
-        finally:
-            dialog.destroy()
-
-    def _load_file(self, buffer: SourceBuffer, file):
-        buffer.data.reset(gfile=file, state=SourceBufferState.LOADING)
-
-        loader: GtkSource.FileLoader
-        loader = GtkSource.FileLoader.new(buffer, buffer.data.sourcefile)
-        loader.set_candidate_encodings(get_custom_encoding_candidates())
-        loader.load_async(GLib.PRIORITY_DEFAULT, None, None,
-                          None, self.file_loaded, buffer)
-
-    def on_menu_open_template(self, widget):
-        file = self._choose_file(_("Open Template"))
-        if file is None:
-            return
-
-        lang = LanguageManager.get_language_from_file(file)
-        self.template_buffer.set_language(lang)
-        # If we guess a non-template language, then it's probably what we're expecting in the output pane.
-        self.result_buffer.set_language(lang)
-
-        self._load_file(self.template_buffer, file)
-
-    def on_menu_open_data(self, widget):
-        file = self._choose_file(_("Open Data"))
-        if file is None:
-            return
-
-        self.data_buffer.set_language(LanguageManager.get_language_from_file(file))
-
-        self._load_file(self.data_buffer, file)
-
-    def file_loaded(self, loader, result, user_data):
-        buf : SourceBuffer
-        buf = user_data
-        try:
-            loader.load_finish(result)
-            buf.data.state = SourceBufferState.LOAD_FINISHED
-        except GLib.Error as err:
-            if err.matches(
-                    GLib.convert_error_quark(),
-                    GLib.ConvertError.ILLEGAL_SEQUENCE):
-                # While there are probably others, this is the main
-                # case where GtkSourceView's loader doesn't finish its
-                # in-progress user-action on error. See bgo#795387 for
-                # the GtkSourceView bug report.
-                #
-                # The handling here is fragile, but it's better than
-                # getting into a non-obvious corrupt state.
-                buf.end_not_undoable_action()
-                buf.end_user_action()
-            if err.domain == GLib.quark_to_string(
-                    GtkSource.FileLoaderError.quark()):
-                # TODO: Add custom reload-with-encoding handling for
-                # GtkSource.FileLoaderError.CONVERSION_FALLBACK and
-                # GtkSource.FileLoaderError.ENCODING_AUTO_DETECTION_FAILED
-                pass
-            buf.data.state = SourceBufferState.LOAD_ERROR
-            log.error("Could not load file", file=buf.data.label, error=err.message)
-            self._show_message(
-                Gtk.MessageType.ERROR,
-                _("Could not open %s") % buf.data.label,
-                err.message)
-
-    def _show_message(self, message_type: Gtk.MessageType, text: str, secondary: str):
-        dialog = Gtk.MessageDialog(
-            transient_for=self, modal=True, message_type=message_type,
-            buttons=Gtk.ButtonsType.CLOSE, text=text, secondary_text=secondary)
-        dialog.run()
-        dialog.destroy()
-
-    def on_menu_save(self, widget):
-        # TODO: save things
-        pass
-
-    def on_menu_quit(self, widget):
-        self.get_application().quit()
-
-    def on_menu_about(self, widget):
-        try:
-            version = metadata.version("j2live")
-        except metadata.PackageNotFoundError:
-            version = None
-        about_dialog = Gtk.AboutDialog(
-            transient_for=self,
-            modal=True,
-            program_name="j2live",
-            version=version,
-            comments=_("Live preview for Jinja2 templates"),
-        )
-        about_dialog.run()
-        about_dialog.destroy()
+    def go_to_error(self):
+        error = next((e for e in self._errors if e.line is not None), None)
+        if error is not None:
+            self._pane_for_error(error).go_to_line(error.line)
 
     def on_error_bar_response(self, info_bar, response_id):
         if response_id == RESPONSE_GO_TO_ERROR:
-            error = next((e for e in self._errors if e.line is not None), None)
-            if error is not None:
-                self.go_to_line(self._view_for_error(error), error.line)
+            self.go_to_error()
 
     def data_updated(self, buffer: Gtk.TextBuffer):
         """Notify the application that source data has been updated.
@@ -585,16 +521,18 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib.source_remove(self._render_source_id)
             self._render_source_id = None
 
-        template = get_text(self.template_buffer)
-        data = get_text(self.data_buffer)
+        template = get_text(self.template_pane.buffer)
+        data = get_text(self.data_pane.buffer)
         if self.worker is None:
-            self._on_render_result(render_plain(template, data))
+            self._on_render_result(render_plain(template, data, self.render_options))
         else:
             self.worker.render({
                 "template": template,
                 "data": data,
-                "template_path": self._buffer_path(self.template_buffer),
-                "data_path": self._buffer_path(self.data_buffer),
+                "template_path": self.template_pane.path,
+                "data_path": self.data_pane.path,
+                "trim_blocks": self.render_options.trim_blocks,
+                "lstrip_blocks": self.render_options.lstrip_blocks,
             }, self._on_render_result)
             self._set_rendering(True)
         return GLib.SOURCE_REMOVE
@@ -618,45 +556,167 @@ class MainWindow(Gtk.ApplicationWindow):
         self.render_spinner.start()
         return GLib.SOURCE_REMOVE
 
-    @staticmethod
-    def _buffer_path(buffer: SourceBuffer) -> Optional[str]:
-        gfile = buffer.data.gfile
-        return gfile.get_path() if gfile is not None else None
-
     def _on_render_result(self, result: RenderResult):
         if self.worker is None or not self.worker.busy:
             self._set_rendering(False)
         if result.output is not None:
-            self.result_buffer.set_text(result.output)
+            self.result_pane.buffer.set_text(result.output)
             log.debug("Re-Rendered results")
         self._show_errors(result.errors)
 
     def _show_errors(self, errors: list[RenderError]):
         self._errors = errors
 
-        for buffer in (self.template_buffer, self.data_buffer):
+        for pane in (self.template_pane, self.data_pane):
+            buffer = pane.buffer
             buffer.remove_source_marks(
                 buffer.get_start_iter(), buffer.get_end_iter(), ERROR_MARK_CATEGORY)
 
         if not errors:
             self.error_bar.set_revealed(False)
-            self.result_view.set_opacity(1.0)
+            self.result_pane.view.set_opacity(1.0)
             return
 
         for error in errors:
             log.debug("Render failed", error=error.describe())
             if error.line is None:
                 continue
-            buffer = self._view_for_error(error).get_buffer()
+            buffer = self._pane_for_error(error).buffer
             buffer.create_source_mark(
                 None, ERROR_MARK_CATEGORY, buffer.get_iter_at_line(error.line))
 
         lines = [GLib.markup_escape_text(e.describe()) for e in errors]
-        if get_text(self.result_buffer):
+        if get_text(self.result_pane.buffer):
             lines.append(
                 "<small>" + _("Output is from the last successful render.") + "</small>")
         self.error_label.set_markup("\n".join(lines))
         self.error_goto_button.set_visible(any(e.line is not None for e in errors))
         self.error_bar.set_revealed(True)
         # Dim the output so it's obvious it doesn't reflect the current inputs
-        self.result_view.set_opacity(0.5)
+        self.result_pane.view.set_opacity(0.5)
+
+    # Files
+
+    def _choose_file(self, title: str) -> Optional[Gio.File]:
+        dialog = Gtk.FileChooserNative.new(title, self, Gtk.FileChooserAction.OPEN, None, None)
+        response = dialog.run()
+        gfile = dialog.get_file()
+        dialog.destroy()
+        return gfile if response == Gtk.ResponseType.ACCEPT else None
+
+    def _confirm_discard(self, pane: EditorPane) -> bool:
+        """Before replacing a pane's contents, check unsaved edits can go"""
+        if not pane.modified:
+            return True
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=_("Discard unsaved changes to %s?") % pane.display_name)
+        dialog.add_buttons(_("_Cancel"), Gtk.ResponseType.CANCEL,
+                           _("_Discard"), Gtk.ResponseType.ACCEPT)
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.ACCEPT
+
+    def _report_load(self, pane: EditorPane, error: Optional[str]):
+        if error is not None:
+            self._show_message(Gtk.MessageType.ERROR,
+                               _("Could not open %s") % pane.display_name, error)
+
+    def _report_save(self, pane: EditorPane, error: Optional[str]):
+        if error is not None and error != _("Cancelled"):
+            self._show_message(Gtk.MessageType.ERROR,
+                               _("Could not save %s") % pane.display_name, error)
+
+    def open_template(self, gfile: Gio.File):
+        # A known file type under the .j2 is probably what the output will be
+        rendered = LanguageManager.get_rendered_language(gfile.get_basename())
+        if rendered is not None:
+            self.result_pane.buffer.set_language(rendered)
+        self.template_pane.load(gfile, self._report_load)
+
+    def open_data(self, gfile: Gio.File):
+        language = LanguageManager.get_language_from_file(gfile)
+        self.data_pane.load(gfile, self._report_load, language=language)
+
+    def on_open_template(self):
+        if not self._confirm_discard(self.template_pane):
+            return
+        gfile = self._choose_file(_("Open Template"))
+        if gfile is not None:
+            self.open_template(gfile)
+
+    def on_open_data(self):
+        if not self._confirm_discard(self.data_pane):
+            return
+        gfile = self._choose_file(_("Open Variables"))
+        if gfile is not None:
+            self.open_data(gfile)
+
+    def on_delete_event(self, window, event):
+        """Offer to save unsaved changes before the window closes"""
+        unsaved = [p for p in (self.template_pane, self.data_pane) if p.modified]
+        if not unsaved or self._close_confirmed:
+            return False
+
+        names = ", ".join(p.display_name for p in unsaved)
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=_("Save changes to %s before closing?") % names,
+            secondary_text=_("Unsaved changes will be lost."))
+        dialog.add_buttons(_("Close _without Saving"), Gtk.ResponseType.REJECT,
+                           _("_Cancel"), Gtk.ResponseType.CANCEL,
+                           _("_Save"), Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+        response = dialog.run()
+        dialog.destroy()
+
+        if response == Gtk.ResponseType.REJECT:
+            self._close_confirmed = True
+            return False
+        if response == Gtk.ResponseType.ACCEPT:
+            self._save_all(unsaved, self._close_after_save)
+        return True
+
+    def _save_all(self, panes: list[EditorPane], on_done: Callable[[bool], None]):
+        """Save panes one after another, stopping at the first failure"""
+        if not panes:
+            on_done(True)
+            return
+
+        def saved(pane, error):
+            self._report_save(pane, error)
+            if error is not None:
+                on_done(False)
+            else:
+                self._save_all(panes[1:], on_done)
+
+        panes[0].save(self, saved)
+
+    def _close_after_save(self, ok: bool):
+        if ok:
+            self._close_confirmed = True
+            self.close()
+
+    def _show_message(self, message_type: Gtk.MessageType, text: str, secondary: str):
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True, message_type=message_type,
+            buttons=Gtk.ButtonsType.CLOSE, text=text, secondary_text=secondary)
+        dialog.run()
+        dialog.destroy()
+
+    def on_about(self):
+        try:
+            version = metadata.version("j2live")
+        except metadata.PackageNotFoundError:
+            version = None
+        about_dialog = Gtk.AboutDialog(
+            transient_for=self,
+            modal=True,
+            program_name="j2live",
+            version=version,
+            comments=_("Live preview for Jinja2 templates"),
+        )
+        about_dialog.run()
+        about_dialog.destroy()
