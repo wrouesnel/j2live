@@ -20,6 +20,21 @@ sudo apt install libcairo2-dev libgirepository-2.0-dev gir1.2-gtk-3.0
 uv run j2live
 ```
 
+## Ansible
+
+Templates render the way Ansible's `template` module renders them (`trim_blocks`,
+Ansible's filters and YAML loading, `#jinja2:` override headers) using the
+ansible-core installed in a Python environment of your choosing. The environment
+in use is shown at the top of the window; click it to switch.
+
+On startup j2live picks the first of these that has ansible-core:
+
+1. the activated virtualenv or conda environment
+2. the interpreter the `ansible` command on your `PATH` runs under
+3. `python3` on your `PATH`
+
+If none do, templates render with plain Jinja2 defaults.
+
 ## Acknowledgements
 
 The UI elements are wholesale borrowed from the [Meld](https://gitlab.gnome.org/GNOME/meld).

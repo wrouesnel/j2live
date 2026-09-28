@@ -5,11 +5,13 @@ from typing import Optional, Tuple
 
 from j2live import logging
 from j2live.language_manager import LanguageManager
-from j2live.render import ErrorSource, RenderError, parse_data, parse_template, render
+from j2live.environments import (
+    AnsibleWorker, PythonEnvironment, detect_interpreters, interpreter_for_prefix, probe)
+from j2live.render import ErrorSource, RenderError, RenderResult, render_plain
 from j2live.ui.sourcebuffer import SourceBuffer, SourceBufferState
 from j2live.ui.sourcestatusbar import SourceStatusBar
 
-from gi.repository import Gdk, Gio, Gtk, GLib, GObject
+from gi.repository import Gdk, Gio, Gtk, GLib, GObject, Pango
 from gi.repository import GtkSource
 
 from j2live.conf import _
@@ -30,6 +32,9 @@ DEFAULT_HEIGHT = 700
 # while a tag is half typed.
 RENDER_DELAY_MS = 150
 
+# Renders faster than this don't flash a spinner
+SPINNER_DELAY_MS = 250
+
 ERROR_MARK_CATEGORY = "j2live-error"
 RESPONSE_GO_TO_ERROR = 1
 
@@ -40,6 +45,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_size_request(800, 500)
         self.set_default_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
 
+        # Ansible environment used for rendering; None renders with plain Jinja2
+        self.environments: list[PythonEnvironment] = []
+        self.environment: Optional[PythonEnvironment] = None
+        self.worker: Optional[AnsibleWorker] = None
+
         # Menu bar
         menubar = self._menubar()
 
@@ -47,6 +57,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.add(box)
 
         box.pack_start(menubar, False, False,0)
+        box.pack_start(self._environment_bar(), False, False, 0)
+        box.pack_start(Gtk.Separator(), False, False, 0)
 
         # Initialize panes
         mainpane: Gtk.Paned
@@ -87,6 +99,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._render_source_id = None
         self._errors: list[RenderError] = []
+        self._detect_environments()
+        self.connect("destroy", lambda *args: self.worker and self.worker.stop())
 
         # Focus can only be grabbed once the window is mapped
         self.connect("map", lambda *args: self.template_view.grab_focus())
@@ -140,6 +154,189 @@ class MainWindow(Gtk.ApplicationWindow):
         menuitem = Gtk.SeparatorMenuItem()
         submenu.add(menuitem)
         return menuitem
+
+    def _environment_bar(self) -> Gtk.Widget:
+        """Shows which Python environment renders templates, and switches it"""
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      margin_start=6, margin_end=6, margin_top=2, margin_bottom=2)
+
+        self.environment_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START)
+        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        button_box.pack_start(
+            Gtk.Image.new_from_icon_name("utilities-terminal-symbolic", Gtk.IconSize.MENU),
+            False, False, 0)
+        button_box.pack_start(self.environment_label, True, True, 0)
+        button_box.pack_start(
+            Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.MENU),
+            False, False, 0)
+
+        self.environment_button = Gtk.MenuButton(relief=Gtk.ReliefStyle.NONE)
+        self.environment_button.add(button_box)
+        self.environment_button.set_popover(self._environment_popover())
+        bar.pack_start(self.environment_button, False, False, 0)
+
+        self.render_spinner = Gtk.Spinner(tooltip_text=_("Rendering…"))
+        self.render_spinner.set_no_show_all(True)
+        bar.pack_start(self.render_spinner, False, False, 0)
+        self._spinner_source_id = None
+
+        self._update_environment_label()
+        return bar
+
+    def _environment_popover(self) -> Gtk.Popover:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=6)
+
+        heading = Gtk.Label(xalign=0)
+        heading.set_markup("<b>%s</b>" % _("Render templates with"))
+        box.pack_start(heading, False, False, 0)
+
+        self.environment_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.environment_list.get_style_context().add_class("frame")
+        self.environment_list.connect("row-activated", self.on_environment_row_activated)
+        box.pack_start(self.environment_list, False, False, 0)
+
+        choose = Gtk.Button(label=_("Choose Environment Folder…"))
+        choose.connect("clicked", self.on_choose_environment)
+        box.pack_start(choose, False, False, 0)
+
+        box.show_all()
+        popover = Gtk.Popover()
+        popover.add(box)
+        return popover
+
+    def _environment_row(self, env: Optional[PythonEnvironment]) -> Gtk.ListBoxRow:
+        if env is None:
+            title = _("Plain Jinja2")
+            detail = _("No Ansible: stock Jinja2 settings and filters")
+        else:
+            title = env.display_prefix
+            if env.has_ansible:
+                detail = _("ansible-core %s · Python %s") % (
+                    env.ansible_version, env.python_version)
+            elif env.error or env.python_version:
+                detail = _("ansible-core not available")
+            else:
+                detail = _("Checking…")
+
+        grid = Gtk.Grid(column_spacing=8, margin=6)
+        check = Gtk.Image.new_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
+        check.set_opacity(1.0 if env is self.environment else 0.0)
+        grid.attach(check, 0, 0, 1, 2)
+        grid.attach(Gtk.Label(label=title, xalign=0), 1, 0, 1, 1)
+        detail_label = Gtk.Label(xalign=0)
+        detail_label.set_markup("<small>%s</small>" % GLib.markup_escape_text(detail))
+        detail_label.get_style_context().add_class("dim-label")
+        grid.attach(detail_label, 1, 1, 1, 1)
+
+        row = Gtk.ListBoxRow()
+        row.add(grid)
+        row.environment = env
+        row.set_sensitive(env is None or env.has_ansible)
+        if env is not None:
+            row.set_tooltip_text(env.error or env.python)
+        row.show_all()
+        return row
+
+    def _refresh_environments(self):
+        for row in self.environment_list.get_children():
+            self.environment_list.remove(row)
+        for env in self.environments:
+            self.environment_list.add(self._environment_row(env))
+        self.environment_list.add(self._environment_row(None))
+        self._update_environment_label()
+
+    def _update_environment_label(self):
+        env = self.environment
+        if env is not None:
+            markup = "%s  <span alpha='60%%'>ansible-core %s</span>" % (
+                GLib.markup_escape_text(env.display_prefix),
+                GLib.markup_escape_text(env.ansible_version))
+            tooltip = _("Rendering with ansible-core %s from %s (Python %s)") % (
+                env.ansible_version, env.python, env.python_version)
+        elif any(not (e.has_ansible or e.error or e.python_version) for e in self.environments):
+            markup = _("Looking for Ansible…")
+            tooltip = None
+        else:
+            markup = "%s  <span alpha='60%%'>%s</span>" % (
+                _("Plain Jinja2"), _("no Ansible environment selected"))
+            tooltip = _("Click to choose a Python environment with ansible-core")
+        self.environment_label.set_markup(markup)
+        self.environment_button.set_tooltip_text(tooltip)
+
+    def _detect_environments(self):
+        """Probe likely environments and use the first with ansible-core"""
+        self.environments = [PythonEnvironment(python) for python in detect_interpreters()]
+        self._refresh_environments()
+
+        def probed(env):
+            self._refresh_environments()
+            pending = [e for e in self.environments
+                       if not (e.has_ansible or e.error or e.python_version)]
+            if pending or self.environment is not None:
+                return
+            found = next((e for e in self.environments if e.has_ansible), None)
+            log.info("Detected environments",
+                     environments=[(e.python, e.ansible_version) for e in self.environments])
+            if found is not None:
+                self._select_environment(found)
+
+        for env in self.environments:
+            probe(env, probed)
+
+    def _select_environment(self, env: Optional[PythonEnvironment]):
+        if self.worker is not None:
+            self.worker.stop()
+            self._set_rendering(False)
+        self.environment = env
+        self.worker = AnsibleWorker(env) if env is not None else None
+        self._refresh_environments()
+        self._rerender()
+
+    def on_environment_row_activated(self, listbox, row):
+        self.environment_button.get_popover().popdown()
+        if row.environment is not self.environment:
+            self._select_environment(row.environment)
+
+    def on_choose_environment(self, button):
+        self.environment_button.get_popover().popdown()
+        dialog = Gtk.FileChooserDialog(
+            title=_("Choose Python Environment"), transient_for=self,
+            action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dialog.add_buttons(
+            _("_Cancel"), Gtk.ResponseType.CANCEL,
+            _("_Select"), Gtk.ResponseType.OK)
+        try:
+            if dialog.run() != Gtk.ResponseType.OK:
+                return
+            prefix = dialog.get_filename()
+        finally:
+            dialog.destroy()
+        self.use_environment_folder(prefix)
+
+    def use_environment_folder(self, prefix: str):
+        """Switch to the Python environment in prefix, if it has ansible-core"""
+        python = interpreter_for_prefix(prefix)
+        if python is None:
+            self._show_message(
+                Gtk.MessageType.ERROR, _("No Python interpreter found"),
+                _("%s does not look like a Python environment.") % prefix)
+            return
+
+        env = next((e for e in self.environments if e.python == python), None)
+        if env is None:
+            env = PythonEnvironment(python)
+            self.environments.append(env)
+
+        def probed(env):
+            self._refresh_environments()
+            if env.has_ansible:
+                self._select_environment(env)
+            else:
+                self._show_message(
+                    Gtk.MessageType.ERROR, _("ansible-core is not available"),
+                    _("Could not import ansible from %s:\n%s") % (env.python, env.error))
+
+        probe(env, probed)
 
     def _result_pane(self, result_editor: Gtk.Widget) -> Gtk.Widget:
         """Wrap the result editor with a bar for reporting render errors"""
@@ -384,26 +581,55 @@ class MainWindow(Gtk.ApplicationWindow):
         self._render_source_id = GLib.timeout_add(RENDER_DELAY_MS, self._rerender)
 
     def _rerender(self):
-        self._render_source_id = None
+        if self._render_source_id is not None:
+            GLib.source_remove(self._render_source_id)
+            self._render_source_id = None
 
-        errors = []
-        data, data_error = parse_data(get_text(self.data_buffer))
-        if data_error:
-            errors.append(data_error)
-        template, template_error = parse_template(get_text(self.template_buffer))
-        if template_error:
-            errors.append(template_error)
-
-        if not errors:
-            result = render(template, data)
-            if result.error:
-                errors.append(result.error)
-            else:
-                self.result_buffer.set_text(result.output)
-                log.debug("Re-Rendered results")
-
-        self._show_errors(errors)
+        template = get_text(self.template_buffer)
+        data = get_text(self.data_buffer)
+        if self.worker is None:
+            self._on_render_result(render_plain(template, data))
+        else:
+            self.worker.render({
+                "template": template,
+                "data": data,
+                "template_path": self._buffer_path(self.template_buffer),
+                "data_path": self._buffer_path(self.data_buffer),
+            }, self._on_render_result)
+            self._set_rendering(True)
         return GLib.SOURCE_REMOVE
+
+    def _set_rendering(self, rendering: bool):
+        """Show a spinner for renders slow enough to notice"""
+        if rendering:
+            if self._spinner_source_id is None and not self.render_spinner.get_visible():
+                self._spinner_source_id = GLib.timeout_add(
+                    SPINNER_DELAY_MS, self._show_spinner)
+            return
+        if self._spinner_source_id is not None:
+            GLib.source_remove(self._spinner_source_id)
+            self._spinner_source_id = None
+        self.render_spinner.stop()
+        self.render_spinner.hide()
+
+    def _show_spinner(self):
+        self._spinner_source_id = None
+        self.render_spinner.show()
+        self.render_spinner.start()
+        return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def _buffer_path(buffer: SourceBuffer) -> Optional[str]:
+        gfile = buffer.data.gfile
+        return gfile.get_path() if gfile is not None else None
+
+    def _on_render_result(self, result: RenderResult):
+        if self.worker is None or not self.worker.busy:
+            self._set_rendering(False)
+        if result.output is not None:
+            self.result_buffer.set_text(result.output)
+            log.debug("Re-Rendered results")
+        self._show_errors(result.errors)
 
     def _show_errors(self, errors: list[RenderError]):
         self._errors = errors

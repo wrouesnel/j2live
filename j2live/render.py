@@ -4,7 +4,7 @@ Kept free of GTK so it can be exercised directly.
 """
 import enum
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import jinja2
@@ -44,11 +44,15 @@ class RenderError:
             where += " error"
         return f"{where}: {self.message}"
 
+    @classmethod
+    def from_json(cls, obj: dict) -> "RenderError":
+        return cls(ErrorSource(obj["source"]), obj["message"], obj.get("line"))
+
 
 @dataclass
 class RenderResult:
     output: Optional[str] = None
-    error: Optional[RenderError] = None
+    errors: list[RenderError] = field(default_factory=list)
 
 
 def parse_data(text: str) -> tuple[Optional[dict], Optional[RenderError]]:
@@ -104,5 +108,19 @@ def render(template: jinja2.Template, data: dict[str, Any]) -> RenderResult:
         message = str(e) or type(e).__name__
         if not isinstance(e, jinja2.TemplateError):
             message = f"{type(e).__name__}: {message}"
-        return RenderResult(error=RenderError(ErrorSource.RENDER, message,
-                                              _template_line(e)))
+        return RenderResult(errors=[RenderError(ErrorSource.RENDER, message,
+                                                _template_line(e))])
+
+
+def render_plain(template_text: str, data_text: str) -> RenderResult:
+    """Render with stock Jinja2 and ruamel YAML, without Ansible."""
+    errors = []
+    data, data_error = parse_data(data_text)
+    if data_error:
+        errors.append(data_error)
+    template, template_error = parse_template(template_text)
+    if template_error:
+        errors.append(template_error)
+    if errors:
+        return RenderResult(errors=errors)
+    return render(template, data)
