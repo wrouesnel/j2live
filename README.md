@@ -68,3 +68,6 @@ host's variables and waits for you to finish before deploying it.
 
 The UI elements are wholesale borrowed from the [Meld](https://gitlab.gnome.org/GNOME/meld).
 All rights to that code belong to them.
+Error reporting, Ansible environment support, editor polish and the
+`j2live_template` Ansible extra were developed with
+[Claude Code](https://claude.com/claude-code) (Claude Opus 5.5).
