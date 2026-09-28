@@ -40,5 +40,10 @@ def main(argv):
     return app.run(argv)
 
 
+def run():
+    """Console script entrypoint"""
+    sys.exit(main(sys.argv))
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

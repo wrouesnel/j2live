@@ -16,4 +16,4 @@ dependencies = [
 config-settings-package = { pygobject-stubs = { config = "Gtk3,Gdk3,Soup2" } }
 
 [project.scripts]
-j2live = "j2live:__main__"
+j2live = "j2live.app:run"

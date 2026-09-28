@@ -1,41 +1,44 @@
 """Main window routines"""
 import functools
-from typing import Tuple
+from importlib import metadata
+from typing import Optional, Tuple
 
-from j2live import logging, ui
+from j2live import logging
 from j2live.language_manager import LanguageManager
+from j2live.render import ErrorSource, RenderError, parse_data, parse_template, render
 from j2live.ui.sourcebuffer import SourceBuffer, SourceBufferState
 from j2live.ui.sourcestatusbar import SourceStatusBar
 
-from gi.repository import Gtk, GLib, GObject
+from gi.repository import Gdk, Gio, Gtk, GLib, GObject
 from gi.repository import GtkSource
 
 from j2live.conf import _
 
-import ruamel.yaml
-import jinja2
-
 from j2live.ui.sourceview import get_custom_encoding_candidates
 
-yaml = ruamel.yaml.YAML(typ='rt')
-
-from j2live.util import template_from_string, get_text
+from j2live.util import get_text
 
 log = logging.getLogger()
 
 DEFAULT_TAB_WIDTH = 4
 DEFAULT_SPACE_TABS = True
 
+DEFAULT_WIDTH = 1100
+DEFAULT_HEIGHT = 700
+
+# Delay after the last edit before re-rendering, so errors don't flicker
+# while a tag is half typed.
+RENDER_DELAY_MS = 150
+
+ERROR_MARK_CATEGORY = "j2live-error"
+RESPONSE_GO_TO_ERROR = 1
+
+
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         Gtk.Window.__init__(self, title=_("j2live"), application=app)
         self.set_size_request(800, 500)
-
-        # self.template_file = None
-        # self.data_file = None
-
-        # grid = Gtk.Grid()
-        # self.add(grid)
+        self.set_default_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
 
         # Menu bar
         menubar = self._menubar()
@@ -43,32 +46,31 @@ class MainWindow(Gtk.ApplicationWindow):
         box = Gtk.Box.new(orientation=Gtk.Orientation.VERTICAL,spacing=0)
         self.add(box)
 
-        box.add(menubar)
         box.pack_start(menubar, False, False,0)
 
         # Initialize panes
         mainpane: Gtk.Paned
         mainpane = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
         # Set initial size to 50/50
-        mainpane.set_position(self.get_size()[0] / 2)
+        mainpane.set_position(DEFAULT_WIDTH // 2)
 
         # Build the editor pane
         editorpane: Gtk.Paned
         editorpane = Gtk.Paned.new(Gtk.Orientation.VERTICAL)
-        editorpane.set_position((self.get_size()[1] / 3) * 2)
+        editorpane.set_position((DEFAULT_HEIGHT // 3) * 2)
 
         # Editor window
-        template_editor, self.template_buffer = self._source_editor()
-        data_editor, self.data_buffer = self._source_editor()
+        template_editor, self.template_buffer, self.template_view = self._source_editor()
+        data_editor, self.data_buffer, self.data_view = self._source_editor()
 
         # Result viewer stands alone
-        result_editor, self.result_buffer = self._source_editor(editable=False)
+        result_editor, self.result_buffer, self.result_view = self._source_editor(editable=False)
 
         editorpane.add1(template_editor)
         editorpane.add2(data_editor)
 
         mainpane.add1(editorpane)
-        mainpane.add2(result_editor)
+        mainpane.add2(self._result_pane(result_editor))
 
         # Add configure main pane
         mainpane.set_vexpand(True)
@@ -80,15 +82,14 @@ class MainWindow(Gtk.ApplicationWindow):
         # Main initialization logic
 
         # Hook up signals for the main editor
-        self.data_buffer.connect("changed", self.data_updated, None)
-        self.template_buffer.connect("changed", self.data_updated, None)
+        self.data_buffer.connect("changed", self.data_updated)
+        self.template_buffer.connect("changed", self.data_updated)
 
-        # Initialize local data
-        self.data = {}
-        self.template = template_from_string(get_text(self.data_buffer))
+        self._render_source_id = None
+        self._errors: list[RenderError] = []
 
-        # Grab the default input editor
-        template_editor.grab_focus()
+        # Focus can only be grabbed once the window is mapped
+        self.connect("map", lambda *args: self.template_view.grab_focus())
 
     def _menubar(self) -> Gtk.MenuBar:
         menubar : Gtk.MenuBar
@@ -140,7 +141,23 @@ class MainWindow(Gtk.ApplicationWindow):
         submenu.add(menuitem)
         return menuitem
 
-    def _source_editor(self, editable=True) -> Tuple[Gtk.Widget, GtkSource.Buffer]:
+    def _result_pane(self, result_editor: Gtk.Widget) -> Gtk.Widget:
+        """Wrap the result editor with a bar for reporting render errors"""
+        box = Gtk.Box.new(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self.error_bar = Gtk.InfoBar(message_type=Gtk.MessageType.ERROR)
+        self.error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        self.error_bar.get_content_area().add(self.error_label)
+        self.error_goto_button = self.error_bar.add_button(
+            _("Go to Error"), RESPONSE_GO_TO_ERROR)
+        self.error_bar.connect("response", self.on_error_bar_response)
+        self.error_bar.set_revealed(False)
+
+        box.pack_start(self.error_bar, False, False, 0)
+        box.pack_start(result_editor, True, True, 0)
+        return box
+
+    def _source_editor(self, editable=True) -> Tuple[Gtk.Widget, SourceBuffer, GtkSource.View]:
         """_source_editor builds a complete source editor object"""
 
         box: Gtk.Box
@@ -159,11 +176,13 @@ class MainWindow(Gtk.ApplicationWindow):
         editor.set_highlight_current_line(True)
         editor.set_tab_width(DEFAULT_TAB_WIDTH)
         editor.set_insert_spaces_instead_of_tabs(DEFAULT_SPACE_TABS)
-        # TODO: just let the props be exposed?
-        editor.props.editable = True
+        editor.props.editable = editable
 
         editor.props.hexpand = True
         editor.props.vexpand = True
+
+        if editable:
+            self._setup_error_marks(editor)
 
         container.add(editor)
 
@@ -173,9 +192,7 @@ class MainWindow(Gtk.ApplicationWindow):
         def bind_adapt_cursor_position(binding, from_value):
             buf = binding.get_source()
             cursor_it = buf.get_iter_at_offset(from_value)
-            # offset = textview.get_visual_column(cursor_it)
-            line = cursor_it.get_line()
-            return (line, from_value)
+            return (cursor_it.get_line(), cursor_it.get_line_offset())
 
         # Set cursor position to 0,0 initially...
         status_bar.props.cursor_position = (0,0)
@@ -194,75 +211,99 @@ class MainWindow(Gtk.ApplicationWindow):
             'encoding', status_bar, 'source-encoding',
             GObject.BindingFlags.DEFAULT)
 
-        # def reload_with_encoding(widget, encoding, pane):
-        #     if not self.check_unsaved_changes([buffer]):
-        #         return
-        #     self.set_file(pane, buffer.data.gfile, encoding)
-
-        def go_to_line(widget, line, pane):
-            if self.cursor.pane == pane and self.cursor.line == line:
-                return
-            self.move_cursor(pane, line, focus=False)
-
-        # TODO:
+        # TODO: reload with a user-chosen encoding
         # status_bar.connect('encoding-changed', reload_with_encoding, editor)
-        status_bar.connect('go-to-line', go_to_line, editor)
+        status_bar.connect(
+            'go-to-line', lambda widget, line: self.go_to_line(editor, line, focus=False))
 
         box.add(container)
         box.add(status_bar)
 
-        return box, buffer
+        return box, buffer, editor
+
+    def _setup_error_marks(self, view: GtkSource.View):
+        """Highlight lines carrying an error mark, with the message as a tooltip"""
+        background = Gdk.RGBA()
+        background.parse("rgba(224, 27, 36, 0.2)")
+
+        attrs = GtkSource.MarkAttributes()
+        attrs.set_icon_name("dialog-error-symbolic")
+        attrs.set_background(background)
+        attrs.connect("query-tooltip-text", self._error_mark_tooltip)
+        attrs.connect("query-tooltip-markup", lambda attrs, mark: None)
+
+        view.set_mark_attributes(ERROR_MARK_CATEGORY, attrs, 0)
+        view.set_show_line_marks(True)
+
+    def _error_mark_tooltip(self, attrs, mark) -> str:
+        buffer = mark.get_buffer()
+        line = buffer.get_iter_at_mark(mark).get_line()
+        return "\n".join(
+            e.describe() for e in self._errors
+            if self._view_for_error(e).get_buffer() is buffer and e.line == line)
+
+    def _view_for_error(self, error: RenderError) -> GtkSource.View:
+        if error.source is ErrorSource.DATA:
+            return self.data_view
+        return self.template_view
+
+    def go_to_line(self, view: GtkSource.View, line: int, focus: bool = True):
+        buffer = view.get_buffer()
+        buffer.place_cursor(buffer.get_iter_at_line(line))
+        view.scroll_to_mark(buffer.get_insert(), 0.1, False, 0, 0)
+        if focus:
+            view.grab_focus()
 
     def _signal_for_current_widget(self, signal_name, *args):
         """_signal_for_current_widget emits the named signal against the currently focused widget"""
         widget = self.get_focus()
+        if widget is None or not GObject.signal_lookup(signal_name, type(widget)):
+            return
         widget.emit(signal_name)
 
-    def on_menu_open_template(self, widget):
-        dialog = Gtk.FileChooserDialog("Select template", self,
-                                       Gtk.FileChooserAction.OPEN,
-                                       (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                                        Gtk.STOCK_OK, Gtk.ResponseType.OK))
-        dialog.run()
-        file = dialog.get_file()
+    def _choose_file(self, title: str) -> Optional[Gio.File]:
+        dialog = Gtk.FileChooserDialog(
+            title=title, transient_for=self, action=Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons(
+            _("_Cancel"), Gtk.ResponseType.CANCEL,
+            _("_Open"), Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        try:
+            if dialog.run() != Gtk.ResponseType.OK:
+                return None
+            return dialog.get_file()
+        finally:
+            dialog.destroy()
 
-        source_file = GtkSource.File.new()
-        source_file.set_location(file)
+    def _load_file(self, buffer: SourceBuffer, file):
+        buffer.data.reset(gfile=file, state=SourceBufferState.LOADING)
+
+        loader: GtkSource.FileLoader
+        loader = GtkSource.FileLoader.new(buffer, buffer.data.sourcefile)
+        loader.set_candidate_encodings(get_custom_encoding_candidates())
+        loader.load_async(GLib.PRIORITY_DEFAULT, None, None,
+                          None, self.file_loaded, buffer)
+
+    def on_menu_open_template(self, widget):
+        file = self._choose_file(_("Open Template"))
+        if file is None:
+            return
 
         lang = LanguageManager.get_language_from_file(file)
         self.template_buffer.set_language(lang)
         # If we guess a non-template language, then it's probably what we're expecting in the output pane.
         self.result_buffer.set_language(lang)
 
-        loader: GtkSource.FileLoader
-        loader = GtkSource.FileLoader.new(self.template_buffer, source_file)
-        loader.set_candidate_encodings(get_custom_encoding_candidates())
-        loader.load_async(GLib.PRIORITY_DEFAULT, None, None,
-                          None, self.file_loaded, self.template_buffer)
-
-
-        dialog.destroy()
+        self._load_file(self.template_buffer, file)
 
     def on_menu_open_data(self, widget):
-        dialog = Gtk.FileChooserDialog("Select data", self,
-                                       Gtk.FileChooserAction.OPEN,
-                                       (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                                        Gtk.STOCK_OK, Gtk.ResponseType.OK))
-        dialog.run()
-        file = dialog.get_file()
-
-        source_file = GtkSource.File.new()
-        source_file.set_location(file)
+        file = self._choose_file(_("Open Data"))
+        if file is None:
+            return
 
         self.data_buffer.set_language(LanguageManager.get_language_from_file(file))
 
-        loader: GtkSource.FileLoader
-        loader = GtkSource.FileLoader.new(self.data_buffer, source_file)
-        loader.set_candidate_encodings(get_custom_encoding_candidates())
-        loader.load_async(GLib.PRIORITY_DEFAULT, None, None,
-                          None, self.file_loaded, self.data_buffer)
-
-        dialog.destroy()
+        self._load_file(self.data_buffer, file)
 
     def file_loaded(self, loader, result, user_data):
         buf : SourceBuffer
@@ -290,56 +331,106 @@ class MainWindow(Gtk.ApplicationWindow):
                 # GtkSource.FileLoaderError.ENCODING_AUTO_DETECTION_FAILED
                 pass
             buf.data.state = SourceBufferState.LOAD_ERROR
+            log.error("Could not load file", file=buf.data.label, error=err.message)
+            self._show_message(
+                Gtk.MessageType.ERROR,
+                _("Could not open %s") % buf.data.label,
+                err.message)
+
+    def _show_message(self, message_type: Gtk.MessageType, text: str, secondary: str):
+        dialog = Gtk.MessageDialog(
+            transient_for=self, modal=True, message_type=message_type,
+            buttons=Gtk.ButtonsType.CLOSE, text=text, secondary_text=secondary)
+        dialog.run()
+        dialog.destroy()
 
     def on_menu_save(self, widget):
         # TODO: save things
         pass
 
     def on_menu_quit(self, widget):
-        Gtk.main_quit()
+        self.get_application().quit()
 
     def on_menu_about(self, widget):
-        Gtk.main_quit()
+        try:
+            version = metadata.version("j2live")
+        except metadata.PackageNotFoundError:
+            version = None
         about_dialog = Gtk.AboutDialog(
+            transient_for=self,
+            modal=True,
             program_name="j2live",
-            title="About j2live",
+            version=version,
+            comments=_("Live preview for Jinja2 templates"),
         )
         about_dialog.run()
         about_dialog.destroy()
 
-    def data_updated(self, buffer: Gtk.TextBuffer, data):
+    def on_error_bar_response(self, info_bar, response_id):
+        if response_id == RESPONSE_GO_TO_ERROR:
+            error = next((e for e in self._errors if e.line is not None), None)
+            if error is not None:
+                self.go_to_line(self._view_for_error(error), error.line)
+
+    def data_updated(self, buffer: Gtk.TextBuffer):
         """Notify the application that source data has been updated.
 
         Should be called everytime dependent data for the render
         is updated. It does not necessarily re-render immediately though in order
         to deduplicate the events.
         """
-        log.debug("Text buffer updated")
+        if self._render_source_id is not None:
+            GLib.source_remove(self._render_source_id)
+        self._render_source_id = GLib.timeout_add(RENDER_DELAY_MS, self._rerender)
 
-        # TODO: notify when the render fails and with whom it fails!
-        if buffer is self.data_buffer:
-            try:
-                new_data = yaml.load(get_text(buffer))
-            except Exception as e:
-                log.exception("Could not parse data input", exc_info=e)
-                return
-            self.data = new_data
-            log.debug("Data replaced")
-        elif buffer is self.template_buffer:
-            try:
-                rtemplate = template_from_string(get_text(buffer))
-            except Exception as e:
-                log.exception("Could not parse input template", exc_info=e)
-                return
-            self.template = rtemplate
-            log.debug("Template replaced")
+    def _rerender(self):
+        self._render_source_id = None
 
-        # Re-render based on the new template or data or both
-        try:
-            new_result = self.template.render(**self.data)
-        except Exception as e:
-            log.exception("Could not render the template", exc_info=e)
+        errors = []
+        data, data_error = parse_data(get_text(self.data_buffer))
+        if data_error:
+            errors.append(data_error)
+        template, template_error = parse_template(get_text(self.template_buffer))
+        if template_error:
+            errors.append(template_error)
+
+        if not errors:
+            result = render(template, data)
+            if result.error:
+                errors.append(result.error)
+            else:
+                self.result_buffer.set_text(result.output)
+                log.debug("Re-Rendered results")
+
+        self._show_errors(errors)
+        return GLib.SOURCE_REMOVE
+
+    def _show_errors(self, errors: list[RenderError]):
+        self._errors = errors
+
+        for buffer in (self.template_buffer, self.data_buffer):
+            buffer.remove_source_marks(
+                buffer.get_start_iter(), buffer.get_end_iter(), ERROR_MARK_CATEGORY)
+
+        if not errors:
+            self.error_bar.set_revealed(False)
+            self.result_view.set_opacity(1.0)
             return
 
-        self.result_buffer.set_text(new_result)
-        log.debug("Re-Rendered results")
+        for error in errors:
+            log.debug("Render failed", error=error.describe())
+            if error.line is None:
+                continue
+            buffer = self._view_for_error(error).get_buffer()
+            buffer.create_source_mark(
+                None, ERROR_MARK_CATEGORY, buffer.get_iter_at_line(error.line))
+
+        lines = [GLib.markup_escape_text(e.describe()) for e in errors]
+        if get_text(self.result_buffer):
+            lines.append(
+                "<small>" + _("Output is from the last successful render.") + "</small>")
+        self.error_label.set_markup("\n".join(lines))
+        self.error_goto_button.set_visible(any(e.line is not None for e in errors))
+        self.error_bar.set_revealed(True)
+        # Dim the output so it's obvious it doesn't reflect the current inputs
+        self.result_view.set_opacity(0.5)

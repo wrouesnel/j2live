@@ -22,6 +22,7 @@ from typing import Optional
 from gi.repository import Gio, GLib, GObject, GtkSource
 
 from j2live import logging
+from j2live.conf import _
 log = logging.get_logger()
 
 class SourceBuffer(GtkSource.Buffer):
