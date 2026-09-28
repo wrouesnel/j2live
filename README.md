@@ -58,6 +58,12 @@ On startup j2live picks the first of these that has ansible-core:
 
 If none do, templates render with plain Jinja2 defaults.
 
+### Editing templates while a playbook runs
+
+[`extras/ansible`](extras/ansible) has `j2live_template`, a drop-in
+replacement for the `template` task that opens the template in j2live with the
+host's variables and waits for you to finish before deploying it.
+
 ## Acknowledgements
 
 The UI elements are wholesale borrowed from the [Meld](https://gitlab.gnome.org/GNOME/meld).

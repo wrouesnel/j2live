@@ -1,0 +1,9 @@
+all:
+  hosts:
+    web1:
+      site_port: 8080
+    web2:
+      site_port: 8081
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"

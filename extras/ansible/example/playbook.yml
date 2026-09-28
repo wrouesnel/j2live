@@ -1,0 +1,23 @@
+# Run with: ansible-playbook playbook.yml
+# j2live opens on templates/site.conf.j2; edit, save and close it to continue.
+- name: Live edit a template while deploying it
+  hosts: all
+  gather_facts: false
+  vars:
+    site_name: "{{ inventory_hostname }}.example.com"
+    upstreams:
+      - 10.0.0.1
+      - 10.0.0.2
+    output_dir: "{{ playbook_dir }}/output"
+  tasks:
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+      run_once: true
+
+    - name: Render site config
+      j2live_template:
+        src: site.conf.j2
+        dest: "{{ output_dir }}/{{ inventory_hostname }}.conf"
+        mode: "0644"

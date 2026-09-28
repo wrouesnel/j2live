@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+upstream backend {
+    {% for host in upstreams %}
+    server {{ host }};
+    {% endfor %}
+}
+
+server {
+    listen {{ site_port }};
+    server_name {{ site_name }};
+}
