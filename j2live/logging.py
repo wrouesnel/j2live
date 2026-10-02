@@ -5,9 +5,14 @@ import os
 import json
 
 import logging
-import structlog
 
-_log_level = os.environ.get("LOG_LEVEL", "debug")
+try:
+    import structlog
+except ImportError:
+    # Not packaged on every distribution; fall back to the stdlib
+    structlog = None
+
+_log_level = os.environ.get("LOG_LEVEL", "info")
 _debug_logs = os.environ.get("LOG_FORMAT", "kv")
 
 _logging_configured = False
@@ -18,6 +23,11 @@ def configure_logging():
     global _log_level
     # Note: this is here because logging is weird and Python is GIL'd.
     if _logging_configured is True:
+        return
+
+    if structlog is None:
+        _configure_stdlib_logging()
+        _logging_configured = True
         return
 
     structlog.configure_once(
@@ -69,9 +79,56 @@ def configure_logging():
     _logging_configured = True
 
 
+def _configure_stdlib_logging():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    root_logger = logging.getLogger()
+    root_logger.handlers = [handler]
+    root_logger.setLevel(logging._nameToLevel[_log_level.upper()])
+
+
+class _KeyValueLogger:
+    """The subset of structlog's logger interface used here, on the stdlib.
+
+    log.info("event", key=value) is rendered as: event key='value'
+    """
+
+    def __init__(self, name=None):
+        self._logger = logging.getLogger(name)
+
+    def _log(self, level, event, *args, exc_info=None, **kw):
+        if not self._logger.isEnabledFor(level):
+            return
+        message = event % args if args else event
+        if kw:
+            message += " " + " ".join("%s=%r" % item for item in sorted(kw.items()))
+        self._logger.log(level, message, exc_info=exc_info)
+
+    def debug(self, event, *args, **kw):
+        self._log(logging.DEBUG, event, *args, **kw)
+
+    def info(self, event, *args, **kw):
+        self._log(logging.INFO, event, *args, **kw)
+
+    def warning(self, event, *args, **kw):
+        self._log(logging.WARNING, event, *args, **kw)
+
+    warn = warning
+
+    def error(self, event, *args, **kw):
+        self._log(logging.ERROR, event, *args, **kw)
+
+    def exception(self, event, *args, **kw):
+        kw.setdefault("exc_info", True)
+        self._log(logging.ERROR, event, *args, **kw)
+
+    def critical(self, event, *args, **kw):
+        self._log(logging.CRITICAL, event, *args, **kw)
+
+
 configure_logging()
 
-get_logger = structlog.get_logger
+get_logger = structlog.get_logger if structlog is not None else _KeyValueLogger
 """
 Alias get_logger in structlog to encourage structlog usage.
 """

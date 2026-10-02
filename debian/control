@@ -1,0 +1,35 @@
+Source: j2live
+Section: devel
+Priority: optional
+Maintainer: Will Rouesnel <wrouesnel@wrouesnel.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-hatchling
+Standards-Version: 4.6.2
+Homepage: https://github.com/wrouesnel/j2live
+Vcs-Browser: https://github.com/wrouesnel/j2live
+Vcs-Git: https://github.com/wrouesnel/j2live.git
+Rules-Requires-Root: no
+
+Package: j2live
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends},
+         gir1.2-gtk-3.0,
+         gir1.2-gtksource-4,
+         python3-gi,
+         python3-jinja2,
+         python3-ruamel.yaml
+Recommends: python3-structlog
+Suggests: ansible-core | ansible
+Description: live preview editor for Jinja2 and Ansible templates
+ j2live shows a Jinja2 template, the YAML variables it is rendered with and
+ the rendered output side by side, re-rendering as you type. Errors are
+ reported with line numbers and whitespace in the output is made visible.
+ .
+ Templates can be rendered exactly as Ansible's template module renders them,
+ using the ansible-core from a Python environment of your choosing. An
+ Ansible action plugin is included that opens templates in j2live while a
+ playbook runs.

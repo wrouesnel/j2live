@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=j2live
+GenericName=Jinja2 Template Editor
+Comment=Live preview for Jinja2 and Ansible templates
+Exec=j2live %f
+Icon=accessories-text-editor
+Terminal=false
+Categories=Development;GTK;
+Keywords=jinja;jinja2;ansible;template;
+MimeType=text/plain;
+StartupNotify=true

@@ -10,6 +10,10 @@ dependencies = [
     { name = "jinja2" },
     { name = "pygobject" },
     { name = "ruamel-yaml" },
+]
+
+[package.optional-dependencies]
+structlog = [
     { name = "structlog" },
 ]
 
@@ -20,11 +24,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "pygobject", specifier = ">=3.56.3" },
-    { name = "ruamel-yaml", specifier = ">=0.19.1" },
-    { name = "structlog", specifier = ">=25.5.0" },
+    { name = "jinja2", specifier = ">=3.0" },
+    { name = "pygobject", specifier = ">=3.42" },
+    { name = "ruamel-yaml", specifier = ">=0.17" },
+    { name = "structlog", marker = "extra == 'structlog'", specifier = ">=21.1" },
 ]
+provides-extras = ["structlog"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pygobject-stubs", specifier = ">=2.17.0" }]

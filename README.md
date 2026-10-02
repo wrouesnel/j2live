@@ -9,18 +9,36 @@ when it comes to editing whitespace. After going round this loop with
 Ansible a few times, and finding a web-based version [here](https://github.com/qn7o/jinja2-live-parser)
 I decided to try and build something I could run locally.
 
-## Installation and Running
+## Installation
 
-This isn't properly developed, but it works for it's basic function.
+**Ubuntu 24.04 and 26.04**
 
-Ubuntu:
+```
+sudo add-apt-repository ppa:w-rouesnel/j2live
+sudo apt install j2live
+```
+
+**RHEL 8 and 10** (and AlmaLinux, Rocky Linux, CentOS Stream), which need
+[EPEL](https://docs.fedoraproject.org/en-US/epel/) for GtkSourceView:
+
+```
+sudo dnf install epel-release
+sudo dnf copr enable wrouesnel/j2live
+sudo dnf install j2live
+```
+
+**From source**, on Ubuntu:
 
 ```
 sudo apt install libcairo2-dev libgirepository-2.0-dev gir1.2-gtk-3.0 gir1.2-gtksource-4
 uv run j2live
 ```
 
-Or install it as a tool with `uv tool install .`
+or install it as a tool with `uv tool install .`
+
+The packages also install the Ansible action plugin described below in
+`/usr/share/j2live/ansible/action_plugins`. Packaging is described in
+[packaging/README.md](packaging/README.md).
 
 ## Usage
 

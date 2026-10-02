@@ -1,0 +1,17 @@
+# Python packages bundled into /opt/j2live on RHEL 8, whose own GTK bindings
+# are only for Python 3.6. Pinned to versions that build against RHEL 8's
+# GLib 2.56; packaging/rpm/make-vendor.sh resolves and downloads them.
+
+# Runtime
+pygobject==3.44.2
+pycairo==1.29.1
+jinja2==3.1.6
+ruamel.yaml==0.18.16
+structlog==25.5.0
+
+# Build tools, used with --no-build-isolation for an offline build
+setuptools
+wheel
+meson-python
+meson
+hatchling

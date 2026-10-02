@@ -1,0 +1,3 @@
+data/com.wrouesnel.j2live.desktop usr/share/applications/
+extras/ansible/action_plugins/j2live_template.py usr/share/j2live/ansible/action_plugins/
+extras/ansible/README.md usr/share/doc/j2live/ansible/
