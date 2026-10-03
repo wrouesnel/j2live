@@ -11,7 +11,7 @@
 
 Name:           j2live
 Version:        0.1.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Live preview editor for Jinja2 and Ansible templates
 
 License:        GPL-2.0-or-later
@@ -131,12 +131,16 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/%{appid}.desktop
 %else
 %files -f %{pyproject_files}
 %endif
+%license LICENSE
 %doc README.md extras/ansible/README.md
 %{_bindir}/%{name}
 %{_datadir}/applications/%{appid}.desktop
 %{_datadir}/%{name}
 
 %changelog
+* Sat Oct 03 2026 Will Rouesnel <wrouesnel@wrouesnel.com> - 0.1.0-3
+- Include the license text
+
 * Sat Oct 03 2026 Will Rouesnel <wrouesnel@wrouesnel.com> - 0.1.0-2
 - Require librsvg2 so GTK can draw its SVG theme icons on minimal installs
 

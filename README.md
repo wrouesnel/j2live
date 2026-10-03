@@ -87,6 +87,12 @@ If none do, templates render with plain Jinja2 defaults.
 replacement for the `template` task that opens the template in j2live with the
 host's variables and waits for you to finish before deploying it.
 
+## License
+
+j2live is licensed under the GNU General Public License, version 2 or (at
+your option) any later version; see [LICENSE](LICENSE). Parts of it are
+adapted from Meld, which is licensed the same way.
+
 ## Acknowledgements
 
 The UI elements are wholesale borrowed from the [Meld](https://gitlab.gnome.org/GNOME/meld).
