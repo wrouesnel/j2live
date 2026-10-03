@@ -42,7 +42,9 @@ after changing `rpm/el8-requirements.in`.
    packaging/deb/publish-ppa.sh      # signs the source uploads and dputs them
    packaging/rpm/publish-copr.sh     # submits the SRPMs to COPR
    ```
-4. Tag the release: `git tag -s v<version> -u "$J2LIVE_SIGNING_KEY"`
+4. Tag the release (`git tag -s v<version>`) and push the tag. GitHub
+   Releases carry only the source; packages are published through the PPA
+   and COPR, never as release assets.
 
 To rebuild the same version for the PPA (for example after a packaging fix),
 bump `PPA_REVISION` (`PPA_REVISION=2 packaging/deb/build.sh`); for COPR bump
@@ -50,17 +52,12 @@ the spec's `Release`.
 
 ## One-time setup
 
-**Signing key.** Run `packaging/make-signing-key.sh` yourself. It creates the
-key in your personal keyring (your pinentry asks for the passphrase and can
-keep it in your login keyring), records the fingerprint in `publish.env` and
-exports the public key to `j2live-signing-key.asc`. Then publish the public
-key and register it with Launchpad:
-
-```
-gpg --keyserver keyserver.ubuntu.com --send-keys <fingerprint>
-```
-
-and add the fingerprint at <https://launchpad.net/~/+editpgpkeys>.
+**Signing key.** PPA uploads are signed with the shared Launchpad key
+`2A128435A6FE8BD751AA578720959AB807096ADB` ("Will Rouesnel (GPG key for
+launchpad signing)"), already registered on the `~w-rouesnel` Launchpad
+account. `publish-ppa.sh` unlocks it with the passphrase from the login
+keyring (`secret-tool lookup service gpg-passphrase fingerprint <fpr>`), or
+gpg's pinentry if there isn't one.
 
 **Launchpad.** Create a PPA named `j2live` at
 <https://launchpad.net/~w-rouesnel/+activate-ppa>.

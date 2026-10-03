@@ -11,14 +11,19 @@ I decided to try and build something I could run locally.
 
 ## Installation
 
-**Ubuntu 24.04 and 26.04**
+**Ubuntu 24.04 and 26.04**, from the PPA
+<https://launchpad.net/~w-rouesnel/+archive/ubuntu/j2live>:
 
 ```
 sudo add-apt-repository ppa:w-rouesnel/j2live
 sudo apt install j2live
 ```
 
-**RHEL 8 and 10** (and AlmaLinux, Rocky Linux, CentOS Stream), which need
+Uploads to the PPA are signed with the key
+`2A128435A6FE8BD751AA578720959AB807096ADB`.
+
+**RHEL 8 and 10** (and AlmaLinux, Rocky Linux, CentOS Stream), from COPR
+<https://copr.fedorainfracloud.org/coprs/wrouesnel/j2live/>. They need
 [EPEL](https://docs.fedoraproject.org/en-US/epel/) for GtkSourceView:
 
 ```

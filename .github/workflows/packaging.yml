@@ -1,0 +1,47 @@
+# Build every package j2live ships, install each in a clean container of its
+# distribution and smoke test it, so a broken package fails CI. Publishing is
+# done separately through the PPA and COPR (see packaging/README.md).
+name: Packaging
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Ubuntu ${{ matrix.series }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        series: [noble, resolute]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke test
+        run: packaging/deb/build.sh ${{ matrix.series }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.series }}
+          path: dist/deb/${{ matrix.series }}/
+          retention-days: 14
+
+  rpm:
+    name: RHEL ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [el8, el10]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke test
+        run: packaging/rpm/build.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.target }}
+          path: dist/rpm/${{ matrix.target }}/
+          retention-days: 14

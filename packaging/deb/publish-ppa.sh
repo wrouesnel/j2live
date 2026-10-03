@@ -15,10 +15,6 @@ if [ "${1:-}" = --dry-run ]; then dry_run=1; shift; fi
 SERIES=("$@")
 [ ${#SERIES[@]} -gt 0 ] || mapfile -t SERIES < <(all_series)
 
-if [ -z "$J2LIVE_SIGNING_KEY" ]; then
-    echo "Set J2LIVE_SIGNING_KEY in packaging/publish.env (see packaging/make-signing-key.sh)" >&2
-    exit 1
-fi
 if ! gpg --list-secret-keys "$J2LIVE_SIGNING_KEY" >/dev/null 2>&1; then
     echo "Signing key $J2LIVE_SIGNING_KEY is not in your keyring" >&2
     exit 1
@@ -34,7 +30,9 @@ for series in "${SERIES[@]}"; do
     if [ $dry_run = 1 ]; then
         dput --simulate --unchecked "$PPA" "${changes[0]}"
     else
-        debsign --re-sign -k"$J2LIVE_SIGNING_KEY" "${changes[0]}"
+        J2LIVE_SIGNING_KEY="$J2LIVE_SIGNING_KEY" debsign --re-sign \
+            -p"$PROJECT_ROOT/packaging/gpg-keyring-passphrase.sh" \
+            -k"$J2LIVE_SIGNING_KEY" "${changes[0]}"
         ${DPUT:-dput} "$PPA" "${changes[0]}"
     fi
 done
